@@ -1,7 +1,48 @@
-from fastapi import APIRouter, HTTPException
+"""
+Milestone 3 - Query API with Response Transparency.
+
+Flow:
+
+    FastAPI
+        ↓
+    Database Session
+        ↓
+    LangGraph Workflow
+        ↓
+    Conversation Memory
+        ↓
+    Query Understanding
+        ↓
+    Conditional Routing
+        ├── Retrieval
+        │     ↓
+        │  Response Generation
+        │
+        └── Clarification
+              ↓
+          Refined Query
+              ↓
+           Retrieval
+              ↓
+       Response Generation
+        ↓
+    Save Conversation
+        ↓
+    Response Transparency
+        ↓
+    Final JSON Response
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
 from app.models.request_models import QueryRequest
 from app.orchestration.workflow import run_workflow
+from app.core.database import get_db
+from app.transparency.service import build_transparency
+from app.voice.output import prepare_speech_text
 
 
 router = APIRouter(
@@ -9,63 +50,63 @@ router = APIRouter(
 )
 
 
-@router.post("/query")
+@router.post(
+    "/query",
+    summary="Query Documents",
+    description=(
+        "Run the Milestone 2 + Milestone 3 LangGraph workflow "
+        "with conversation memory, clarification, and response transparency."
+    ),
+)
 def query_documents(
     request: QueryRequest,
+    db: Session = Depends(get_db),
 ):
     """
-    Run the complete Milestone 2 LangGraph workflow.
+    Execute the complete M3 query workflow.
 
-    Flow:
-        FastAPI
-            ↓
-        LangGraph Workflow
-            ↓
-        Query Understanding
-            ↓
-        Query Routing
-            ↓
-        Retrieval
-            ↓
-        Response Generation
-            ↓
-        Final Response
+    A request without conversation_id remains compatible with
+    the earlier single-query workflow.
+
+    A request with conversation_id enables conversation memory.
+
+    Clarification fields are used when continuing a previous
+    clarification interaction.
     """
 
-    # -------------------------------------------------------------
-    # Validate request
-    # -------------------------------------------------------------
-
+    # Validate retrieval count.
     if request.k < 1:
         raise HTTPException(
             status_code=400,
-            detail="k must be at least 1",
+            detail="k must be at least 1.",
         )
 
     try:
-        # ---------------------------------------------------------
-        # Run the complete LangGraph workflow
-        # ---------------------------------------------------------
-
+        # Execute the existing M3 LangGraph workflow.
         result = run_workflow(
             query=request.query,
             k=request.k,
+            conversation_id=request.conversation_id,
+            clarification_answer=(
+                request.clarification_answer
+            ),
+            clarification_question=(
+                request.clarification_question
+            ),
+            original_query=(
+                request.original_query
+            ),
+            db=db,
         )
 
-        # ---------------------------------------------------------
-        # Handle workflow-level errors
-        # ---------------------------------------------------------
-
+        # Return workflow-level failures as API errors.
         if result.get("error"):
             raise HTTPException(
                 status_code=500,
                 detail=result["error"],
             )
 
-        # ---------------------------------------------------------
-        # Extract Query Understanding result
-        # ---------------------------------------------------------
-
+        # Convert QueryUnderstandingResult into JSON-safe data.
         query_analysis = result.get(
             "query_analysis"
         )
@@ -77,13 +118,47 @@ def query_documents(
                 query_analysis.model_dump()
             )
 
-        # ---------------------------------------------------------
-        # Return final Milestone 2 response
-        # ---------------------------------------------------------
+        # Get clarification information.
+        clarification_required = result.get(
+            "clarification_required",
+            False,
+        )
+
+        clarification_question = result.get(
+            "clarification_question"
+        )
+
+        # Get retrieval and generated-response data.
+        retrieval_result = result.get(
+            "retrieval_result"
+        )
+
+        response_result = result.get(
+            "response"
+        )
+
+        # Build the dedicated transparency object from retrieval data.
+        transparency = build_transparency(
+            retrieval_result
+        )
+
+        speech_text = (
+            prepare_speech_text(
+                response_result.get("answer", "")
+            )
+            if response_result
+            else None
+        )
 
         return {
             "success": True,
+
+            # Preserve the original user query in the API response.
             "query": request.query,
+
+            "conversation_id": result.get(
+                "conversation_id"
+            ),
 
             "query_understanding": (
                 query_understanding
@@ -97,13 +172,22 @@ def query_documents(
                 "route_reason"
             ),
 
-            "retrieval": result.get(
-                "retrieval_result"
+            "clarification_required": (
+                clarification_required
             ),
 
-            "response": result.get(
-                "response"
+            "clarification_question": (
+                clarification_question
             ),
+
+            "retrieval": retrieval_result,
+
+            "response": response_result,
+
+            "speech_text": speech_text,
+
+            # Dedicated Response Transparency information.
+            "transparency": transparency,
         }
 
     except HTTPException:
@@ -113,7 +197,7 @@ def query_documents(
         raise HTTPException(
             status_code=400,
             detail=str(error),
-        )
+        ) from error
 
     except Exception as error:
         raise HTTPException(
@@ -121,4 +205,4 @@ def query_documents(
             detail=(
                 f"Query processing failed: {error}"
             ),
-        )
+        ) from error
